@@ -12,21 +12,23 @@ from pathlib import Path
 from shutil import which
 from typing import List, Literal, Optional, Tuple
 from albert import *
+import sqlite3
 
 
 md_name = "Visual Studio Code"
 md_iid = "2.1"
 md_description = "Open & search recent Visual Studio Code files and folders."
 md_id = "vs"
-md_version = "0.6"
+md_version = "0.7"
 md_maintainers = ["@mparati31", "@bierchermuesli"]
 md_url = "https://github.com/mparati31/albert-vscode"
 
 
 class Plugin(PluginInstance, GlobalQueryHandler):
     ICON = [f"file:{Path(__file__).parent}/icon.png"]
-    VSCODE_RECENT_PATH = Path.home() / ".config" / "Code" / "User" / "globalStorage" / "storage.json"
+    VSCODE_RECENT_PATH = Path.home() / ".config" / "Code" / "User" / "globalStorage" / "state.vscdb"
     EXECUTABLE = which("code")
+    VSCDB_HISTORY_KEY = "history.recentlyOpenedPathsList"
 
     def __init__(self):
         GlobalQueryHandler.__init__(self, id=md_id, name=md_name, description=md_description, defaultTrigger="vs ")
@@ -36,17 +38,19 @@ class Plugin(PluginInstance, GlobalQueryHandler):
     def get_visual_studio_code_recent(
         self,
     ) -> Tuple[List[str], List[str]]:
-        storage = json.load(open(self.VSCODE_RECENT_PATH, "r"))
-        menu_items = storage["lastKnownMenubarData"]["menus"]["File"]["items"]
-        file_menu_items = list(filter(lambda item: item["id"] == "submenuitem.MenubarRecentMenu", menu_items))
-        submenu_recent_items = file_menu_items[0]["submenu"]["items"]
-        files = list(filter(lambda item: item["id"] == "openRecentFile", submenu_recent_items))
-        folders = list(filter(lambda item: item["id"] == "openRecentFolder", submenu_recent_items))
-        extract_path = lambda item: item["uri"]["path"]
-        files_paths = list(map(extract_path, files))
-        folders_paths = list(map(extract_path, folders))
-        return files_paths, folders_paths
+        con = sqlite3.connect(self.VSCODE_RECENT_PATH)
+        cur = con.cursor()
+        res = cur.execute("SELECT value FROM ItemTable WHERE key = (?)", [self.VSCDB_HISTORY_KEY])
+        result = res.fetchone()[0]
+        
+        storage = json.loads(result)
+        menu_items = storage["entries"]
 
+        folders = list(map(lambda item: item["folderUri"], filter(lambda item: "folderUri" in item, menu_items)))
+        files = list(map(lambda item: item["fileUri"], filter(lambda item: "fileUri" in item, menu_items)))
+        
+        return files, folders
+        
     # Returns the abbreviation of `path` that has `maxchars` character size.
     def resize_path(self, path: str | Path, maxchars: int = 45) -> str:
         filepath = Path(path)
@@ -83,13 +87,17 @@ class Plugin(PluginInstance, GlobalQueryHandler):
 
     # Return a recent item.
     def make_recent_item(self, path: str | Path, recent_type: Literal["file", "folder"]) -> Item:
-        resized_path = self.resize_path(path)
-        path_splits = resized_path.split("/")
-        working_dir_path, filename = path_splits[:-1], path_splits[-1]
-        formatted_path = "{}/{}".format("/".join(working_dir_path), filename)
-
+        finalPath = path.replace("file://", "")
         return self.make_item(
-            formatted_path, "Open Recent {}".format(recent_type), [Action(id=path, text="Open in Visual Studio Code", callable=lambda: runDetachedProcess(cmdln=[self.EXECUTABLE, path]))]
+            finalPath,
+            "Open Recent {}".format(recent_type),
+            [
+                Action(
+                    id=path,
+                    text="Open in Visual Studio Code",
+                    callable=lambda: runDetachedProcess(cmdln=[self.EXECUTABLE, finalPath])
+                )
+            ]
         )
 
     def handleTriggerQuery(self, query) -> Optional[List[Item]]:
@@ -98,13 +106,13 @@ class Plugin(PluginInstance, GlobalQueryHandler):
 
         query_text = query.string
 
-        debug("query: '{}'".format(query_text))
+        # debug("query: '{}'".format(query_text))
 
         query_text = query_text.strip().lower()
         files, folders = self.get_visual_studio_code_recent()
 
-        debug("vs recent files: {}".format(files))
-        debug("vs recent folders: {}".format(folders))
+        # print("vs recent files: {}".format(files))
+        # print("vs recent folders: {}".format(folders))
 
         if not folders and not files:
             return [query.add(self.make_new_window_item()), query.add(self.make_item("Recent Files and Folders not found"))]
